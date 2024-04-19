@@ -196,7 +196,7 @@
 
 ```
 
-后来看了一眼旭神的代码才发现我写的太麻烦了， 完全可以在第一次遍历CFG的时候，将所有的工作都完成。仍然是遍历CFG的流程，但是维护一个`workList`和`liveNodes`，每次遍历到一个`node`时将其加入`liveNodes`，同时判断它是`assignstmt`还是`if`和`switch`，如果是这种情况的话依次处理，对于`if`和`switch`根据条件将可达的路径加入到`workList`，这样遍历CFG的时候就会遍历不到其他不可达的分支，最后再将所有不可达的node加入`deadCode`，非常的优雅。
+后来看了一眼旭神的代码才发现我写的太麻烦了， 完全可以在第一次遍历CFG的时候，将所有的工作都完成。仍然是遍历CFG的流程，但是维护一个`workList`和`liveNodes`，每次遍历到一个`node`时将其加入`liveNodes`，同时判断它是`assignstmt`还是`if`和`switch`，如果是这种情况的话依次处理，对于`if`和`switch`根据条件将可达的路径加入到`workList`，这样遍历CFG的时候就会遍历不到其他不可达的分支，最后再将所有不可达的node加入`deadCode`，非常的优雅
 
 
 
