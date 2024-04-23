@@ -24,19 +24,21 @@ package pascal.taie.analysis.dataflow.inter;
 
 import pascal.taie.analysis.dataflow.analysis.constprop.CPFact;
 import pascal.taie.analysis.dataflow.analysis.constprop.ConstantPropagation;
+import pascal.taie.analysis.dataflow.analysis.constprop.Value;
 import pascal.taie.analysis.graph.cfg.CFG;
 import pascal.taie.analysis.graph.cfg.CFGBuilder;
-import pascal.taie.analysis.graph.icfg.CallEdge;
-import pascal.taie.analysis.graph.icfg.CallToReturnEdge;
-import pascal.taie.analysis.graph.icfg.NormalEdge;
-import pascal.taie.analysis.graph.icfg.ReturnEdge;
+import pascal.taie.analysis.graph.icfg.*;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
 import pascal.taie.ir.exp.InvokeExp;
+import pascal.taie.ir.exp.LValue;
+import pascal.taie.ir.exp.RValue;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.language.classes.JMethod;
+
+import java.util.*;
 
 /**
  * Implementation of interprocedural constant propagation for int values.
@@ -77,36 +79,105 @@ public class InterConstantPropagation extends
     @Override
     protected boolean transferCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        return false;
+        return out.copyFrom(in);
     }
 
     @Override
     protected boolean transferNonCallNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        return false;
+        return cp.transferNode(stmt, in, out);
     }
 
     @Override
     protected CPFact transferNormalEdge(NormalEdge<Stmt> edge, CPFact out) {
         // TODO - finish me
-        return null;
+        return out;
     }
 
     @Override
     protected CPFact transferCallToReturnEdge(CallToReturnEdge<Stmt> edge, CPFact out) {
         // TODO - finish me
-        return null;
+        Stmt sourceStmt = edge.getSource();
+        CPFact outCopy = out.copy();
+        Optional<LValue> def = sourceStmt.getDef();
+        if (def.isPresent()){
+            if (def.get() instanceof Var var){
+                if (cp.canHoldInt(var))
+                    outCopy.remove(var);
+            }
+        }
+        return outCopy;
     }
 
     @Override
     protected CPFact transferCallEdge(CallEdge<Stmt> edge, CPFact callSiteOut) {
         // TODO - finish me
-        return null;
+        CPFact resFact = new CPFact();
+        Stmt sourceStmt = edge.getSource();
+        //icfg.getContainingMethodOf(targetStmt).getIR()
+        List<Var> methodParams = edge.getCallee().getIR().getParams();
+        if (sourceStmt instanceof Invoke){
+            Invoke invokeStmt = (Invoke) sourceStmt;
+            InvokeExp invokeExp = invokeStmt.getInvokeExp();
+            int argCount = invokeExp.getArgCount();
+            for (int i=0;i<argCount;i++){
+                Var arg = invokeExp.getArg(i);
+                if (cp.canHoldInt(arg)){
+                    Var formalVal = methodParams.get(i);
+                    Value value = callSiteOut.get(arg);
+                    resFact.update(formalVal, value);
+                }
+
+            }
+        }
+        return resFact;
     }
 
     @Override
     protected CPFact transferReturnEdge(ReturnEdge<Stmt> edge, CPFact returnOut) {
         // TODO - finish me
-        return null;
+
+        CPFact resFact = new CPFact();
+        Optional<LValue> def = edge.getCallSite().getDef();
+        if (def.isPresent()){
+            if (def.get() instanceof Var defVar){
+                if (cp.canHoldInt(defVar)){
+                    Collection<Var> returnVars = edge.getReturnVars();
+                    LinkedList<Value> valueList = new LinkedList<>();
+                    boolean isConst = true;
+                    boolean isNAC = false;
+                    for (Var retVar:returnVars){
+                        Value value = returnOut.get(retVar);
+                        if (value.isNAC()){
+                            isNAC = true;
+                            break;
+                        } else if (value.isConstant()) {
+                            valueList.add(value);
+                        }
+                    }
+                    if (valueList.isEmpty()){
+                        isConst = false;
+                    }else {
+                        for (int i=0;i<valueList.size()-1;i++){
+                            if (valueList.get(i)!=valueList.get(i+1)){
+                                isConst = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (isNAC) {
+                        resFact.update(defVar, Value.getNAC());
+                    } else if (isConst) {
+                        resFact.update(defVar, valueList.get(0));
+                    } else {
+                        resFact.update(defVar, Value.getUndef());
+                    }
+                }
+
+            }
+        }
+
+
+        return resFact;
     }
 }

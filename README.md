@@ -198,6 +198,100 @@
 
 后来看了一眼旭神的代码才发现我写的太麻烦了， 完全可以在第一次遍历CFG的时候，将所有的工作都完成。仍然是遍历CFG的流程，但是维护一个`workList`和`liveNodes`，每次遍历到一个`node`时将其加入`liveNodes`，同时判断它是`assignstmt`还是`if`和`switch`，如果是这种情况的话依次处理，对于`if`和`switch`根据条件将可达的路径加入到`workList`，这样遍历CFG的时候就会遍历不到其他不可达的分支，最后再将所有不可达的node加入`deadCode`，非常的优雅
 
+## 作业 4：类层次结构分析与过程间常量传播
+
+要实现的东西ppt里面的算法都给了，基本上就是一些细节上可能会忽略，具体有些忘了只写我还记得的bug。
+
+CHA的实现就是ppt的那三张图，`dispatch`要考虑到返回`null`和方法是抽象方法的情况就没问题，`resolve`的话我卡了的一个点就是`VIRTUAL`和`INTERFACE`的情况下，如果声明的类型是接口，除了要调用`getDirectImplementorsOf`还需要调用`getDirectSubinterfacesOf`，把二者都加入到`worklist`里面。`buildCallGraph`好像没啥坑点。
+
+
+
+过程间的常量传播和过程内的常量传播不同的点就是需要引入一个`transferEdge`来增加对`in`的处理，即这张图：
+
+![image-20240423142738029](README.assets/image-20240423142738029.png)
+
+这个`transferEdge`我一开始卡了很久，一直没有想明白就是`transferXXXXEdge`和`transferXXXNode`这两者的关系是什么，我一开始还以为是要在`transferXXXNode`中调用`transferXXXXEdge`，一直没想明白。想了好久才理解到这种设计的思路，`transferXXXXEdge`就是在处理`in`的那一步，处理完`in`之后就会调用`transferXXXNode`，`transferXXXXEdge`这一步只是为处理`in`服务的。理解了这一步再去思考就能明白这两类函数到底要实现什么功能了。对于`transferCallNode`直接返回将`in`复制到`out`就行不需要变化，`transferNonCallNode`就调用正常的`cp.transferNode(stmt, in, out);`
+
+`edge`有四种边，`transferCallToReturnEdge`要把左边的变量删掉，`transferCallEdge`就是函数参数的遍历，基本都没啥问题，稍微复杂一点的就是`transferReturnEdge`，因为要通过`edge.getReturnVars();`来获取返回参数，这个函数的注释里面提到了特殊的情况：
+
+```java
+Each method in ICFG has only one exit, but it may have multiple return statements. This API returns all returned variables. E. g., for the return edges starting from the exit of method:
+  int foo(...) {
+      if (...) {
+          return x;
+      } else {
+          return y;
+      }
+  }
+  
+this API returns [x, y].
+Returns:
+the variables that hold the return values.
+```
+
+即返回的参数不同的情况，这种的处理就类似于之前常量传播的`meet`，如果`x`和`y`有一个是`NAC`那么返回值就是`NAC`，如果`x`和`y`是一样的常量那么返回值也是常量，如果`x`和`y`有一个是`UNDEF`，那么直接取另外一个。以这种处理逻辑类推到多个返回参数值的情况来返回判断：
+
+```java
+    @Override
+    protected CPFact transferReturnEdge(ReturnEdge<Stmt> edge, CPFact returnOut) {
+        // TODO - finish me
+
+        CPFact resFact = new CPFact();
+        Optional<LValue> def = edge.getCallSite().getDef();
+        if (def.isPresent()){
+            if (def.get() instanceof Var defVar){
+                if (cp.canHoldInt(defVar)){
+                    Collection<Var> returnVars = edge.getReturnVars();
+                    LinkedList<Value> valueList = new LinkedList<>();
+                    boolean isConst = true;
+                    boolean isNAC = false;
+                    for (Var retVar:returnVars){
+                        Value value = returnOut.get(retVar);
+                        if (value.isNAC()){
+                            isNAC = true;
+                            break;
+                        } else if (value.isConstant()) {
+                            valueList.add(value);
+                        }
+                    }
+                    if (valueList.isEmpty()){
+                        isConst = false;
+                    }else {
+                        for (int i=0;i<valueList.size()-1;i++){
+                            if (valueList.get(i)!=valueList.get(i+1)){
+                                isConst = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (isNAC) {
+                        resFact.update(defVar, Value.getNAC());
+                    } else if (isConst) {
+                        resFact.update(defVar, valueList.get(0));
+                    } else {
+                        resFact.update(defVar, Value.getUndef());
+                    }
+                }
+
+            }
+        }
+        return resFact;
+    }
+```
+
+不过我感觉我写的逻辑还是过于复杂了，不够优雅。此外就是实验要求中的，不可以修改`out`。
+
+
+
+最后的`worklist`实现就比较简单了，初始化的时候对于`main`方法设置boundary fact，其他都不用。具体的`worklist`实现也和之前的差不多，除了`in`的处理有变化，要调用`transferEdge`
+
+```java
+                Fact edgeOut = analysis.transferEdge(edge, result.getOutFact(edge.getSource()));
+                analysis.meetInto(edgeOut, in);
+```
+
+
+
 
 
 ## References
