@@ -26,28 +26,20 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import pascal.taie.World;
 import pascal.taie.analysis.graph.callgraph.CallGraphs;
-import pascal.taie.analysis.graph.callgraph.CallKind;
 import pascal.taie.analysis.graph.callgraph.DefaultCallGraph;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.heap.HeapModel;
 import pascal.taie.analysis.pta.core.heap.Obj;
-import pascal.taie.ir.exp.InvokeExp;
+import pascal.taie.ir.exp.NewExp;
 import pascal.taie.ir.exp.Var;
-import pascal.taie.ir.proginfo.MethodRef;
-import pascal.taie.ir.stmt.Copy;
-import pascal.taie.ir.stmt.Invoke;
-import pascal.taie.ir.stmt.LoadArray;
-import pascal.taie.ir.stmt.LoadField;
-import pascal.taie.ir.stmt.New;
-import pascal.taie.ir.stmt.StmtVisitor;
-import pascal.taie.ir.stmt.StoreArray;
-import pascal.taie.ir.stmt.StoreField;
+import pascal.taie.ir.stmt.*;
 import pascal.taie.language.classes.ClassHierarchy;
+import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
-import pascal.taie.util.AnalysisException;
 import pascal.taie.language.type.Type;
 
 import java.util.List;
+import java.util.Set;
 
 class Solver {
 
@@ -97,6 +89,16 @@ class Solver {
      */
     private void addReachable(JMethod method) {
         // TODO - finish me
+        // add reachable method to call graph
+        if (callGraph.addReachableMethod(method)) {
+            //Set of reachable statements
+            List<Stmt> stmts = method.getIR().getStmts();
+            //add stmts to Set of reachable statements
+            for (Stmt stmt : stmts) {
+                stmt.accept(stmtProcessor);
+            }
+        }
+
     }
 
     /**
@@ -105,6 +107,59 @@ class Solver {
     private class StmtProcessor implements StmtVisitor<Void> {
         // TODO - if you choose to implement addReachable()
         //  via visitor pattern, then finish me
+        public Void visit(New stmt) {
+            ;
+            Obj obj = heapModel.getObj(stmt);
+            VarPtr varPtr = pointerFlowGraph.getVarPtr(stmt.getLValue());
+            PointsToSet pts = new PointsToSet(obj);
+            workList.addEntry(varPtr, pts);
+            return null;
+        }
+
+        public Void visit(Copy stmt) {
+            addPFGEdge(pointerFlowGraph.getVarPtr(stmt.getRValue()),pointerFlowGraph.getVarPtr(stmt.getLValue()));
+            return null;
+        }
+
+        public Void visit(LoadField stmt) {
+            JField field = stmt.getFieldRef().resolve();
+            if (field.isStatic()) {
+
+                StaticField staticField = pointerFlowGraph.getStaticField(field);
+                VarPtr varPtr = pointerFlowGraph.getVarPtr(stmt.getLValue());
+                addPFGEdge(staticField, varPtr);
+            }
+            return null;
+        }
+
+        public Void visit(StoreField stmt) {
+            JField field = stmt.getFieldRef().resolve();
+            if (field.isStatic()) {
+                StaticField staticField = pointerFlowGraph.getStaticField(field);
+                VarPtr varPtr = pointerFlowGraph.getVarPtr(stmt.getRValue());
+                addPFGEdge(varPtr, staticField);
+            }
+            return null;
+        }
+
+        public Void visit(Invoke stmt) {
+            //处理静态调用
+            if (stmt.isStatic()) {
+                JMethod callee = resolveCallee(null, stmt);
+                if (callee != null) {
+                    addReachable(callee);
+                    callee.getIR().getParams().forEach(param -> {
+                        addPFGEdge(pointerFlowGraph.getVarPtr(stmt.getInvokeExp().getArgs().get(param.getIndex())), pointerFlowGraph.getVarPtr(param));
+                    });
+                    callee.getIR().getReturnVars().forEach(retVar -> {
+                        if (stmt.getResult() != null){
+                            addPFGEdge(pointerFlowGraph.getVarPtr(retVar), pointerFlowGraph.getVarPtr(stmt.getResult()));
+                        }
+                    });
+                }
+            }
+            return null;
+        }
     }
 
     /**
@@ -112,6 +167,10 @@ class Solver {
      */
     private void addPFGEdge(Pointer source, Pointer target) {
         // TODO - finish me
+        if (pointerFlowGraph.addEdge(source, target))
+            if (!source.getPointsToSet().isEmpty())
+                workList.addEntry(target, source.getPointsToSet());
+
     }
 
     /**
@@ -119,6 +178,34 @@ class Solver {
      */
     private void analyze() {
         // TODO - finish me
+        while (!workList.isEmpty()) {
+
+            WorkList.Entry entry = workList.pollEntry();
+            Pointer pointer = entry.pointer();
+            PointsToSet pointsToSet = entry.pointsToSet();
+
+            PointsToSet diff = propagate(pointer, pointsToSet);
+            if (pointer instanceof VarPtr) {
+                Var var = ((VarPtr) pointer).getVar();
+                //null?
+                for (Obj obj : diff) {
+                    var.getLoadFields().forEach(loadField -> {
+                        addPFGEdge(pointerFlowGraph.getInstanceField(obj, loadField.getFieldRef().resolve()), pointerFlowGraph.getVarPtr(loadField.getLValue()));
+                    });
+                    var.getStoreFields().forEach(storeField -> {
+                        addPFGEdge(pointerFlowGraph.getVarPtr(storeField.getRValue()), pointerFlowGraph.getInstanceField(obj, storeField.getFieldRef().resolve()));
+                    });
+                    var.getLoadArrays().forEach(loadArray -> {
+                        addPFGEdge(pointerFlowGraph.getArrayIndex(obj), pointerFlowGraph.getVarPtr(loadArray.getLValue()));
+                    });
+                    var.getStoreArrays().forEach(storeArray -> {
+                        addPFGEdge(pointerFlowGraph.getVarPtr(storeArray.getRValue()), pointerFlowGraph.getArrayIndex(obj));
+                    });
+                    processCall(var, obj);
+                }
+            }
+        }
+
     }
 
     /**
@@ -127,17 +214,54 @@ class Solver {
      */
     private PointsToSet propagate(Pointer pointer, PointsToSet pointsToSet) {
         // TODO - finish me
+        if (!pointsToSet.isEmpty()) {
+            PointsToSet ptn = pointer.getPointsToSet();
+            //计算pointsToSet和ptn的差集，并把pointsToSet加入ptn
+            PointsToSet diff = new PointsToSet();
+            pointsToSet.objects().forEach(obj -> {
+                if (ptn.addObject(obj)) {
+                    diff.addObject(obj);
+                }
+            });
+            if (!diff.isEmpty()){
+                pointerFlowGraph.getSuccsOf(pointer).forEach(succ -> {
+                    workList.addEntry(succ, pointsToSet);
+                });
+            }
+            return diff;
+
+        }
         return null;
     }
 
     /**
      * Processes instance calls when points-to set of the receiver variable changes.
      *
-     * @param var the variable that holds receiver objects
+     * @param var  the variable that holds receiver objects
      * @param recv a new discovered object pointed by the variable.
      */
     private void processCall(Var var, Obj recv) {
         // TODO - finish me
+        var.getInvokes().forEach(invoke -> {
+            JMethod callee = resolveCallee(recv, invoke);
+            if (callee != null) {
+                //pointerFlowGraph.get
+                workList.addEntry(pointerFlowGraph.getVarPtr(callee.getIR().getThis()), new PointsToSet(recv));
+                if (callGraph.addEdge(new Edge<>(CallGraphs.getCallKind(invoke), invoke, callee))) {
+                    addReachable(callee);
+                    callee.getIR().getParams().forEach(param -> {
+                        addPFGEdge(pointerFlowGraph.getVarPtr(invoke.getInvokeExp().getArgs().get(param.getIndex()-1)), pointerFlowGraph.getVarPtr(param));
+                    });
+                    callee.getIR().getReturnVars().forEach(retVar -> {
+                        if (invoke.getResult() != null){
+                            addPFGEdge(pointerFlowGraph.getVarPtr(retVar), pointerFlowGraph.getVarPtr(invoke.getResult()));
+                        }
+                    });
+
+                }
+
+            }
+        });
     }
 
     /**

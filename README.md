@@ -290,7 +290,21 @@ the variables that hold the return values.
                 analysis.meetInto(edgeOut, in);
 ```
 
+## 作业 5：非上下文敏感指针分析
 
+写作业4已经是一个月前的事了，五一假期+五月的其他时间和课程耽误了很多，而且研一快结束了在雁栖湖狠狠玩爽了，所以很久没有写这个了。
+
+作业五也是这个实验通过率最高的，57%的通过率说明基本不会有坑，能把算法实现就能过了。
+
+要实现的是非上下文敏感指针分析，具体的算法课程中也是反复的提及，只不过要加上静态字段、数组和静态方法的处理。
+
+一开始在理解这三个新加的内容上花费了很久的时间，一直没搞懂`addReachable`里到底要多实现哪些东西。后来大概理解了就是，静态字段和`x=y`处理是一样的，数组和`filed`的处理是一样的，然后静态方法在`addReachable`额外处理，因为`processCall`是专门处理其他实例方法调用，即虚调用、接口调用和特殊调用。
+
+一个坑就是所有的指针不要自己`new`，要通过类似`pointerFlowGraph.getVarPtr()`的方式来获得，这样才会把一个指针加入到PFG中，不然PFG中只有指向关系，不会有节点。
+
+以及就是作业中提到的访问者模式，具体可以参考[访问者设计模式](https://refactoringguru.cn/design-patterns/visitor)，以前也没有接触过，原来`accept`方法是用来实现访问者模式的。
+
+还有就是ppt中算法的`reachable statements`是不需要专门存储的，因为在具体的代码中可以通过类似`var.getLoadFields()`的方式去获取对应的`stmt`，不需要一个专门的`reachable statements`来存储。
 
 
 
@@ -299,3 +313,5 @@ the variables that hold the return values.
 [Java静态分析框架Tai-e的简单使用 - Y4er的博客](https://y4er.com/posts/simple-use-of-the-java-static-analysis-framework-tai-e/)
 
 [Z3ratu1/Tai-e-assignments: Tai-e assignments for static program analysis](https://github.com/Z3ratu1/Tai-e-assignments/tree/main)
+
+[访问者设计模式](https://refactoringguru.cn/design-patterns/visitor)
