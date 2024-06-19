@@ -50,17 +50,12 @@ import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.config.AnalysisOptions;
 import pascal.taie.ir.exp.InvokeExp;
 import pascal.taie.ir.exp.Var;
-import pascal.taie.ir.stmt.Copy;
-import pascal.taie.ir.stmt.Invoke;
-import pascal.taie.ir.stmt.LoadArray;
-import pascal.taie.ir.stmt.LoadField;
-import pascal.taie.ir.stmt.New;
-import pascal.taie.ir.stmt.StmtVisitor;
-import pascal.taie.ir.stmt.StoreArray;
-import pascal.taie.ir.stmt.StoreField;
+import pascal.taie.ir.stmt.*;
 import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.type.Type;
+
+import java.util.List;
 
 class Solver {
 
@@ -112,6 +107,16 @@ class Solver {
      */
     private void addReachable(CSMethod csMethod) {
         // TODO - finish me
+        // add reachable method to call graph
+        if (callGraph.addReachableMethod(csMethod)) {
+            //Set of reachable statements
+            List<Stmt> stmts = csMethod.getMethod().getIR().getStmts();
+            StmtProcessor stmtProcessor = new StmtProcessor(csMethod);
+            //add stmts to Set of reachable statements
+            for (Stmt stmt : stmts) {
+                stmt.accept(stmtProcessor);
+            }
+        }
     }
 
     /**
@@ -130,6 +135,63 @@ class Solver {
 
         // TODO - if you choose to implement addReachable()
         //  via visitor pattern, then finish me
+        public Void visit(New stmt) {
+            ;
+            Obj obj = heapModel.getObj(stmt);
+            Context ct = contextSelector.selectHeapContext(csMethod, obj);
+            CSObj csObj = csManager.getCSObj(ct, obj);
+            CSVar csVar = csManager.getCSVar(context, stmt.getLValue());
+
+            PointsToSet pts = PointsToSetFactory.make(csObj);
+            workList.addEntry(csVar, pts);
+            return null;
+        }
+
+        public Void visit(Copy stmt) {
+            addPFGEdge(csManager.getCSVar(context, stmt.getRValue()), csManager.getCSVar(context, stmt.getLValue()));
+            return null;
+        }
+
+        public Void visit(LoadField stmt) {
+            JField field = stmt.getFieldRef().resolve();
+            if (field.isStatic()) {
+                StaticField staticField = csManager.getStaticField(field);
+                CSVar csVar = csManager.getCSVar(context, stmt.getLValue());
+                addPFGEdge(staticField, csVar);
+            }
+            return null;
+        }
+
+        public Void visit(StoreField stmt) {
+            JField field = stmt.getFieldRef().resolve();
+            if (field.isStatic()) {
+
+                StaticField staticField = csManager.getStaticField(field);
+                CSVar csVar = csManager.getCSVar(context, stmt.getRValue());
+                addPFGEdge(csVar, staticField);
+            }
+            return null;
+        }
+
+        public Void visit(Invoke stmt) {
+            //处理静态调用
+            if (stmt.isStatic()) {
+                JMethod callee = resolveCallee(null, stmt);
+                if (callee != null) {
+                    Context ct = contextSelector.selectContext(csManager.getCSCallSite(context, stmt), callee);
+                    addReachable(csManager.getCSMethod(ct, callee));
+                    callee.getIR().getParams().forEach(param -> {
+                        addPFGEdge(csManager.getCSVar(context,stmt.getInvokeExp().getArgs().get(param.getIndex())), csManager.getCSVar(ct,param));
+                    });
+                    callee.getIR().getReturnVars().forEach(retVar -> {
+                        if (stmt.getResult() != null){
+                            addPFGEdge(csManager.getCSVar(ct,retVar), csManager.getCSVar(context,stmt.getResult()));
+                        }
+                    });
+                }
+            }
+            return null;
+        }
     }
 
     /**
@@ -137,6 +199,9 @@ class Solver {
      */
     private void addPFGEdge(Pointer source, Pointer target) {
         // TODO - finish me
+        if (pointerFlowGraph.addEdge(source, target))
+            if (!source.getPointsToSet().isEmpty())
+                workList.addEntry(target, source.getPointsToSet());
     }
 
     /**
@@ -144,6 +209,34 @@ class Solver {
      */
     private void analyze() {
         // TODO - finish me
+        while (!workList.isEmpty()) {
+
+            WorkList.Entry entry = workList.pollEntry();
+            Pointer pointer = entry.pointer();
+            PointsToSet pointsToSet = entry.pointsToSet();
+
+            PointsToSet diff = propagate(pointer, pointsToSet);
+            if (pointer instanceof CSVar) {
+                Var var = ((CSVar) pointer).getVar();
+                Context context = ((CSVar) pointer).getContext();
+                for (CSObj obj : diff) {
+                    var.getLoadFields().forEach(loadField -> {
+
+                        addPFGEdge(csManager.getInstanceField(obj, loadField.getFieldRef().resolve()), csManager.getCSVar(context, loadField.getLValue()));
+                    });
+                    var.getStoreFields().forEach(storeField -> {
+                        addPFGEdge(csManager.getCSVar(context, storeField.getRValue()), csManager.getInstanceField(obj, storeField.getFieldRef().resolve()));
+                    });
+                    var.getLoadArrays().forEach(loadArray -> {
+                        addPFGEdge(csManager.getArrayIndex(obj), csManager.getCSVar(context, loadArray.getLValue()));
+                    });
+                    var.getStoreArrays().forEach(storeArray -> {
+                        addPFGEdge(csManager.getCSVar(context, storeArray.getRValue()), csManager.getArrayIndex(obj));
+                    });
+                    processCall((CSVar) pointer, obj);
+                }
+            }
+        }
     }
 
     /**
@@ -152,6 +245,23 @@ class Solver {
      */
     private PointsToSet propagate(Pointer pointer, PointsToSet pointsToSet) {
         // TODO - finish me
+        if (!pointsToSet.isEmpty()) {
+            PointsToSet ptn = pointer.getPointsToSet();
+            //计算pointsToSet和ptn的差集，并把pointsToSet加入ptn
+            PointsToSet diff = PointsToSetFactory.make();
+            pointsToSet.objects().forEach(obj -> {
+                if (ptn.addObject(obj)) {
+                    diff.addObject(obj);
+                }
+            });
+            if (!diff.isEmpty()){
+                pointerFlowGraph.getSuccsOf(pointer).forEach(succ -> {
+                    workList.addEntry(succ, pointsToSet);
+                });
+            }
+            return diff;
+
+        }
         return null;
     }
 
@@ -163,6 +273,29 @@ class Solver {
      */
     private void processCall(CSVar recv, CSObj recvObj) {
         // TODO - finish me
+        recv.getVar().getInvokes().forEach(invoke -> {
+            JMethod callee = resolveCallee(recvObj, invoke);
+            if (callee != null) {
+                //pointerFlowGraph.get
+                Context ct = contextSelector.selectContext(csManager.getCSCallSite(recv.getContext(), invoke),recvObj, callee);
+                workList.addEntry(csManager.getCSVar(ct,callee.getIR().getThis() ), PointsToSetFactory.make(recvObj));
+
+                if (callGraph.addEdge(new Edge<>(CallGraphs.getCallKind(invoke), csManager.getCSCallSite(recv.getContext(),invoke), csManager.getCSMethod(ct,callee)))) {
+                    addReachable(csManager.getCSMethod(ct,callee));
+                    callee.getIR().getParams().forEach(param -> {
+                        addPFGEdge(csManager.getCSVar(recv.getContext(),invoke.getInvokeExp().getArgs().get(param.getIndex()-1)), csManager.getCSVar(ct,param));
+                    });
+                    callee.getIR().getReturnVars().forEach(retVar -> {
+                        if (invoke.getResult() != null){
+                            addPFGEdge(csManager.getCSVar(ct,retVar), csManager.getCSVar(recv.getContext(),invoke.getResult()));
+
+                        }
+                    });
+
+                }
+
+            }
+        });
     }
 
     /**
